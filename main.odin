@@ -16,6 +16,7 @@ VID       :: 0x373b
 PID       :: 0x101a
 PID_8K    :: 0x101b
 INTERFACE :: 1
+can_do_more_than_1K := false
 
 wired := false
 
@@ -29,6 +30,7 @@ open_mouse :: proc(ctx: libusb.Context) -> (dev_handle: libusb.Device_Handle, ha
         if libusb.get_device_descriptor(idev, &desc) != .SUCCESS do continue
         if (desc.idProduct == PID || desc.idProduct == PID_8K) && desc.idVendor == VID {
             dev = idev
+            can_do_more_than_1K = desc.idProduct == PID_8K
             break
         }
     } 
@@ -50,6 +52,10 @@ PollingRate :: enum u16 {
     Hz250   = 0x5104,
     Hz500   = 0x5302,
     Hz1000  = 0x5401,
+    Hz2000  = 0x4510,
+    Hz4000  = 0x3520,
+    Hz8000  = 0x1540,
+
 }
 ctrl_transfer :: proc (dev_handle: libusb.Device_Handle, reqType: u8, req: u8, value: u16, index: u16, data: []u8) -> libusb.Error {
     err := libusb.control_transfer(dev_handle, reqType, req, value, index, slice.as_ptr(data), u16(len(data)), 0)
@@ -74,6 +80,7 @@ set_polling_rate :: proc (dev_handle: libusb.Device_Handle, polling_rate: Pollin
 CliOptions :: struct {
     polling_rate: int `usage:"Set polling rate(125, 250, 500, 1000)"`,
     query_charge: bool `usage:"Output current charge"`,
+    query_poll:   bool `usage:"Output current polling rate"`,
 } 
 DriverError :: union #shared_nil {
     libusb.Error,
@@ -89,14 +96,31 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
     mouse, has_kern_driver := open_mouse(ctx) or_return
     defer if has_kern_driver do libusb.attach_kernel_driver(mouse, INTERFACE)
 
-    charge_data := [?]u8{0x8, 0x4, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x49}
     libusb.claim_interface(mouse, INTERFACE) or_return
     defer libusb.release_interface(mouse, INTERFACE)
-    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, charge_data[:]) or_return
-    interrupt_transfer(mouse, 0x82, charge_data[:]) or_return
 
-    if opts.query_charge do fmt.println(charge_data[6])
-    
+    polls_reverse := map[PollingRate]int {
+        .Hz125 = 125,
+        .Hz250 = 250,
+        .Hz500 = 500,
+        .Hz1000 = 1000,
+        .Hz2000 = 2000,
+        .Hz4000 = 4000,
+        .Hz8000 = 8000,
+    }    
+    if opts.query_charge {
+        charge_data := [?]u8{0x8, 0x4, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x49}
+        ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, charge_data[:]) or_return
+        interrupt_transfer(mouse, 0x82, charge_data[:]) or_return
+        fmt.println(charge_data[6])
+    } 
+    if opts.query_poll {
+        poll_data := [?]u8{ 0x8, 0x8, 0x0, 0x0, 0x0, 0x6, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x3f }
+        ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, poll_data[:]) or_return
+        interrupt_transfer(mouse, 0x82, poll_data[:]) or_return
+        fmt.println(polls_reverse[(transmute(^PollingRate)&poll_data[6])^])
+    } 
+
     if opts.polling_rate != 0 {
         polls := map[int]PollingRate {
             125  = .Hz125,
@@ -104,6 +128,17 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
             500  = .Hz500,
             1000 = .Hz1000,
         }    
+        if can_do_more_than_1K {
+            polls = map[int]PollingRate {
+                125  = .Hz125,
+                250  = .Hz250,
+                500  = .Hz500,
+                1000 = .Hz1000,
+                2000 = .Hz2000,
+                4000 = .Hz4000,
+                8000 = .Hz8000,
+            }    
+        }
         if poll, ok := polls[opts.polling_rate]; ok {
             set_polling_rate(mouse, poll) or_return
         } else {
