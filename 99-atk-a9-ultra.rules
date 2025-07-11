@@ -1,2 +1,4 @@
-SUBSYSTEM=="usb", ATTR{idVendor}=="0x373b", ATTR{idProduct}=="101a", MODE="0666"
-SUBSYSTEM=="hidraw", ATTR{idVendor}=="0x373b", ATTR{idProduct}=="101a", MODE="0666"
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="101a", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="373b", ATTR{idProduct}=="101a", MODE="0666", TAG+="uaccess" 
+SUBSYSTEM=="hidraw", ATTRS{idVendor}=="373b", ATTRS{idProduct}=="101b", MODE="0666", TAG+="uaccess"
+SUBSYSTEM=="usb", ATTR{idVendor}=="373b", ATTR{idProduct}=="101b", MODE="0666", TAG+="uaccess" 

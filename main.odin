@@ -14,6 +14,7 @@ import "base:runtime"
 import "libusb"
 VID       :: 0x373b
 PID       :: 0x101a
+PID_8K    :: 0x101b
 INTERFACE :: 1
 
 wired := false
@@ -26,7 +27,7 @@ open_mouse :: proc(ctx: libusb.Context) -> (dev_handle: libusb.Device_Handle, ha
     for idev in devs {
         desc: libusb.Device_Descriptor = {}
         if libusb.get_device_descriptor(idev, &desc) != .SUCCESS do continue
-        if desc.idProduct == PID && desc.idVendor == VID {
+        if (desc.idProduct == PID || desc.idProduct == PID_8K) && desc.idVendor == VID {
             dev = idev
             break
         }
