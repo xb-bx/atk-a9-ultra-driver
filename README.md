@@ -1,7 +1,12 @@
 # Linux driver for ATK A9 Ultra
 Capabilities:
-- [X] Get battery charge
-- [X] Set current polling rate
+- [X] Query battery charge
+- [X] Set/Query polling rate
+- [X] Set/Query hibernation time 
+- [X] Set/Query angle snap
+- [X] Set/Query ripple correction
+- [X] Set/Query move synchronization
+- [X] Set/Query key delay time
 # Build requirements
     - odin
     - make

@@ -47,15 +47,24 @@ open_mouse :: proc(ctx: libusb.Context) -> (dev_handle: libusb.Device_Handle, ha
     return dev_handle, has_kern_driver, .SUCCESS
 }
 
-PollingRate :: enum u16 {
-    Hz125   = 0x4d08,
-    Hz250   = 0x5104,
-    Hz500   = 0x5302,
-    Hz1000  = 0x5401,
-    Hz2000  = 0x4510,
-    Hz4000  = 0x3520,
-    Hz8000  = 0x1540,
-
+PollingRate :: enum {
+    Hz1000 = 0x1,
+    Hz500  = 0x2,
+    Hz250  = 0x4,
+    Hz125  = 0x8,
+    Hz2000 = 0x10,
+    Hz4000 = 0x20,
+    Hz8000 = 0x40,
+}
+decode_driver_number :: proc(number: u16) -> int {
+    return int(number & 0xFF)
+}
+encode_driver_number :: proc(number: int) -> u16 {
+    number := u16(number)
+    res :u16= 0
+    res = number & 0xFF
+    res |= (0x55 - res) << 8
+    return res
 }
 ctrl_transfer :: proc (dev_handle: libusb.Device_Handle, reqType: u8, req: u8, value: u16, index: u16, data: []u8) -> libusb.Error {
     err := libusb.control_transfer(dev_handle, reqType, req, value, index, slice.as_ptr(data), u16(len(data)), 0)
@@ -71,25 +80,182 @@ interrupt_transfer :: proc(dev_handle: libusb.Device_Handle, endpoint: u8, buf: 
 
 set_polling_rate :: proc (dev_handle: libusb.Device_Handle, polling_rate: PollingRate) -> libusb.Error {
     payload := [?]u8{ 0x08, 0x07, 0x00, 0x00, 0x00, 0x06, 0x08, 0x4d, 0x04, 0x51, 0x03, 0x52, 0x00, 0x00, 0x00, 0x00, 0x41, }; 
-    (transmute(^u16)&payload[6])^ = u16(polling_rate)
+    (transmute(^u16)&payload[6])^ = encode_driver_number(int(polling_rate))
     ctrl_transfer(dev_handle, 0x21, 0x9, 0x0208, INTERFACE, payload[:]) or_return
     buf := [17]u8{}
     interrupt_transfer(dev_handle, 0x82, buf[:]) or_return
     return nil
 }
 CliOptions :: struct {
-    polling_rate: int `usage:"Set polling rate(125, 250, 500, 1000)"`,
-    query_charge: bool `usage:"Output current charge"`,
-    query_poll:   bool `usage:"Output current polling rate"`,
+    polling_rate: int `usage:"Set polling rate(125, 250, 500, 1000, 2000, 4000, 8000)"`,
+    hibernation: string `usage:"Set hibernation time(10s, 30s, 50s, 1m, 2m, 15m, 30m)"`,
+    key_delay: int `usage:"Set key delay time(0, 1, 2, 4, 8, 15, 20)"`,
+    move_sync: int `usage:"Set move synchronization(0, 1)"`,
+    angle_snap: int `usage:"Set angle snape(0, 1)"`,
+    ripple_correction: int `usage:"Set ripple correction(0, 1)"`,
+    query: string `usage:"Output selected parameters (--query charge,polling-rate)"`,
+    list_querriable: bool `usage:"Print querriable parameters"`,
 } 
+InvalidValue :: union {
+    string
+}
 DriverError :: union #shared_nil {
     libusb.Error,
-    CfgErr,
+    InvalidValue,
 }
-CfgErr :: enum {
-    None,
-    InvalidPollRate,
+Query :: struct {
+    data: [17]u8,
+    extract: proc(data: []u8) -> string,
 }
+Hibernation :: enum {
+    S10 = 1,
+    S30 = 3,
+    S50 = 5,
+    M1  = 6,
+    M2  = 12,
+    M15 = 90,
+    M30 = 180,
+}
+hibernations: map[string]Hibernation = {
+    "10s" = .S10,
+    "30s" = .S30,
+    "50s" = .S50,
+    "1m"  = .M1,
+    "2m"  = .M2,
+    "15m" = .M15,
+    "30m" = .M30,
+}
+hib_to_string :: proc(hib: Hibernation) -> string {
+    val := int(hib)
+    if val < 6 {
+        return fmt.aprintf("%is", val * 10)
+    } else {
+        return fmt.aprintf("%im", val * 10 / 60)
+    }
+} 
+querries: map[string]Query = {
+    "charge" = Query {
+        data = QUERY_CHARGE,
+        extract = proc(data: []u8) -> string {
+            return fmt.aprint(data[6])
+        }
+    },
+    "polling-rate" = Query {
+        data = QUERY_POLL,
+        extract = proc(data: []u8) -> string {
+            polls_reverse := map[PollingRate]int {
+                .Hz125 = 125,
+                .Hz250 = 250,
+                .Hz500 = 500,
+                .Hz1000 = 1000,
+                .Hz2000 = 2000,
+                .Hz4000 = 4000,
+                .Hz8000 = 8000,
+            }    
+            return fmt.aprint(polls_reverse[PollingRate(decode_driver_number((transmute(^u16)&data[6])^))])
+        }
+    },
+    "hibernation" = Query {
+        data = QUERY_HIBERNATION, 
+        extract = proc(data: []u8) -> string {
+            return (hib_to_string(Hibernation(decode_driver_number((transmute(^u16)&data[10])^)) ))
+        },
+    },
+    "key-delay" = Query {
+        data = QUERY_HIBERNATION, 
+        extract = proc(data: []u8) -> string {
+            return fmt.aprint(decode_driver_number((transmute(^u16)&data[6])^))
+        },
+    },
+    "move-sync" = Query {
+        data = QUERY_HIBERNATION, 
+        extract = proc(data: []u8) -> string {
+            return fmt.aprint(decode_driver_number((transmute(^u16)&data[8])^))
+        },
+    },
+    "angle-snap" = Query {
+        data = QUERY_HIBERNATION, 
+        extract = proc(data: []u8) -> string {
+            return fmt.aprint(decode_driver_number((transmute(^u16)&data[12])^))
+        },
+    },
+    "ripple-correction" = Query {
+        data = QUERY_HIBERNATION, 
+        extract = proc(data: []u8) -> string {
+            return fmt.aprint(decode_driver_number((transmute(^u16)&data[14])^))
+        },
+    },
+}
+QUERY_CHARGE            :: [?]u8{ 0x8, 0x4, 0x0, 0x0, 0x0,  0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x49 }
+QUERY_POLL              :: [?]u8{ 0x8, 0x8, 0x0, 0x0, 0x0,  0x6, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x3f }
+QUERY_HIBERNATION       :: [?]u8{ 0x8, 0x8, 0x0, 0x0, 0xa9, 0xa, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x92 }
+QUERY_KEY_DELAY         :: QUERY_HIBERNATION
+QUERY_MOVE_SYNC         :: QUERY_HIBERNATION
+QUERY_ANGLE_SNAP        :: QUERY_HIBERNATION
+QUERY_RIPPLE_CORRECTION :: QUERY_HIBERNATION
+
+query :: proc(mouse: libusb.Device_Handle, data: []u8) -> libusb.Error {
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, data[:]) or_return
+    interrupt_transfer(mouse, 0x82, data[:]) or_return
+    return nil
+}
+set_key_delay :: proc(mouse: libusb.Device_Handle, key_delay: int) -> libusb.Error {
+    q := QUERY_MOVE_SYNC
+    query(mouse, q[:]) or_return
+    q[1] = 7
+    q[16] = 0xea
+    (transmute(^u16)&q[6])^= encode_driver_number(int(key_delay))
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
+    return nil
+}
+set_move_sync :: proc(mouse: libusb.Device_Handle, move_sync: bool) -> libusb.Error {
+    q := QUERY_MOVE_SYNC
+    query(mouse, q[:]) or_return
+    q[1] = 7
+    q[16] = 0xea
+    (transmute(^u16)&q[8])^= encode_driver_number(int(move_sync))
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
+    return nil
+}
+set_angle_snap :: proc(mouse: libusb.Device_Handle, angle_snap: bool) -> libusb.Error {
+    q := QUERY_ANGLE_SNAP
+    query(mouse, q[:]) or_return
+    q[1] = 7
+    q[16] = 0xea
+    (transmute(^u16)&q[12])^= encode_driver_number(int(angle_snap))
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
+    return nil
+}
+set_ripple_correction :: proc(mouse: libusb.Device_Handle, ripple_correction: bool) -> libusb.Error {
+    q := QUERY_ANGLE_SNAP
+    query(mouse, q[:]) or_return
+    q[1] = 7
+    q[16] = 0xea
+    (transmute(^u16)&q[14])^= encode_driver_number(int(ripple_correction))
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
+    return nil
+}
+set_hibernation :: proc(mouse: libusb.Device_Handle, hibernation: Hibernation) -> libusb.Error {
+    q := QUERY_HIBERNATION
+    query(mouse, q[:]) or_return
+    q[1] = 7
+    q[16] = 0xea
+    (transmute(^u16)&q[10])^= encode_driver_number(int(hibernation))
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
+    return nil
+}
+
+
 driver_main :: proc(opts: CliOptions) -> DriverError {
     ctx := libusb.Context {}
     libusb.init(&ctx)
@@ -99,27 +265,16 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
     libusb.claim_interface(mouse, INTERFACE) or_return
     defer libusb.release_interface(mouse, INTERFACE)
 
-    polls_reverse := map[PollingRate]int {
-        .Hz125 = 125,
-        .Hz250 = 250,
-        .Hz500 = 500,
-        .Hz1000 = 1000,
-        .Hz2000 = 2000,
-        .Hz4000 = 4000,
-        .Hz8000 = 8000,
-    }    
-    if opts.query_charge {
-        charge_data := [?]u8{0x8, 0x4, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x49}
-        ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, charge_data[:]) or_return
-        interrupt_transfer(mouse, 0x82, charge_data[:]) or_return
-        fmt.println(charge_data[6])
-    } 
-    if opts.query_poll {
-        poll_data := [?]u8{ 0x8, 0x8, 0x0, 0x0, 0x0, 0x6, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x3f }
-        ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, poll_data[:]) or_return
-        interrupt_transfer(mouse, 0x82, poll_data[:]) or_return
-        fmt.println(polls_reverse[(transmute(^PollingRate)&poll_data[6])^])
-    } 
+    if opts.query != "" {
+        string_querries := strings.split(opts.query, ",")
+        for query in string_querries {
+            if q, ok := querries[query]; ok {
+                ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, q.data[:]) or_return
+                interrupt_transfer(mouse, 0x82, q.data[:]) or_return
+                fmt.println(q.extract(q.data[:]))
+            }
+        }
+    }
 
     if opts.polling_rate != 0 {
         polls := map[int]PollingRate {
@@ -142,21 +297,52 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
         if poll, ok := polls[opts.polling_rate]; ok {
             set_polling_rate(mouse, poll) or_return
         } else {
-            return .InvalidPollRate
+            return "polling-rate"
+        }
+    } 
+    if opts.key_delay != -1 {
+        valid_delays := []int {0, 1, 2, 4, 8, 15, 20}
+        if !slice.contains(valid_delays, opts.key_delay) {
+            return "key-delay" 
+        }
+        set_key_delay(mouse, opts.key_delay) or_return
+    }
+    if opts.move_sync != -1 {
+        set_move_sync(mouse, opts.move_sync != 0) or_return
+    }
+    if opts.angle_snap != -1 {
+        set_angle_snap(mouse, opts.angle_snap != 0) or_return
+    }
+    if opts.ripple_correction != -1 {
+        set_ripple_correction(mouse, opts.ripple_correction != 0) or_return
+    }
+    if opts.hibernation != "" {
+        if hib, ok := hibernations[opts.hibernation]; ok {
+            set_hibernation(mouse, hib)
+        } else {
+            return "hibernation"
         }
     }
-    times := false
 
     return nil
 }
 main :: proc () {
     opts: CliOptions = {}
+    opts.key_delay         = -1
+    opts.move_sync         = -1
+    opts.angle_snap        = -1
+    opts.ripple_correction = -1
     if len(os.args) == 1 {
         flags.write_usage(os.stream_from_handle(os.stdout), typeid_of(CliOptions), os.args[0], .Unix)
         return
     }
     flags.parse_or_exit(&opts, os.args, .Unix)
-
+    if opts.list_querriable {
+        for k, _ in querries {
+            fmt.println(k)
+        }
+        return  
+    } 
     err := driver_main(opts)
     if err != nil {
         fmt.eprintln("ERROR:", err)
