@@ -10,6 +10,8 @@ import "core:c"
 import "core:strconv"
 import "core:path/filepath"
 import "core:flags"
+import "core:encoding/json"
+import "core:io"
 import "base:runtime"
 import "libusb"
 VID       :: 0x373b
@@ -93,8 +95,7 @@ CliOptions :: struct {
     move_sync: int `usage:"Set move synchronization(0, 1)"`,
     angle_snap: int `usage:"Set angle snape(0, 1)"`,
     ripple_correction: int `usage:"Set ripple correction(0, 1)"`,
-    query: string `usage:"Output selected parameters (--query charge,polling-rate)"`,
-    list_querriable: bool `usage:"Print querriable parameters"`,
+    query: bool `usage:"Output current mouse state in json"`,
 } 
 InvalidValue :: union {
     string
@@ -105,7 +106,7 @@ DriverError :: union #shared_nil {
 }
 Query :: struct {
     data: [17]u8,
-    extract: proc(data: []u8) -> string,
+    insert: proc(data: []u8, obj: ^json.Object),
 }
 Hibernation :: enum {
     S10 = 1,
@@ -133,16 +134,16 @@ hib_to_string :: proc(hib: Hibernation) -> string {
         return fmt.aprintf("%im", val * 10 / 60)
     }
 } 
-querries: map[string]Query = {
-    "charge" = Query {
+querries: []Query = {
+    Query {
         data = QUERY_CHARGE,
-        extract = proc(data: []u8) -> string {
-            return fmt.aprint(data[6])
+        insert = proc(data: []u8, obj: ^json.Object) {
+            obj["charge"] = i64(data[6])
         }
     },
-    "polling-rate" = Query {
+    Query {
         data = QUERY_POLL,
-        extract = proc(data: []u8) -> string {
+        insert = proc(data: []u8, obj: ^json.Object) {
             polls_reverse := map[PollingRate]int {
                 .Hz125 = 125,
                 .Hz250 = 250,
@@ -152,37 +153,17 @@ querries: map[string]Query = {
                 .Hz4000 = 4000,
                 .Hz8000 = 8000,
             }    
-            return fmt.aprint(polls_reverse[PollingRate(decode_driver_number((transmute(^u16)&data[6])^))])
+            obj["polling_rate"] = i64(polls_reverse[PollingRate(decode_driver_number((transmute(^u16)&data[6])^))])
         }
     },
-    "hibernation" = Query {
+    Query {
         data = QUERY_HIBERNATION, 
-        extract = proc(data: []u8) -> string {
-            return (hib_to_string(Hibernation(decode_driver_number((transmute(^u16)&data[10])^)) ))
-        },
-    },
-    "key-delay" = Query {
-        data = QUERY_HIBERNATION, 
-        extract = proc(data: []u8) -> string {
-            return fmt.aprint(decode_driver_number((transmute(^u16)&data[6])^))
-        },
-    },
-    "move-sync" = Query {
-        data = QUERY_HIBERNATION, 
-        extract = proc(data: []u8) -> string {
-            return fmt.aprint(decode_driver_number((transmute(^u16)&data[8])^))
-        },
-    },
-    "angle-snap" = Query {
-        data = QUERY_HIBERNATION, 
-        extract = proc(data: []u8) -> string {
-            return fmt.aprint(decode_driver_number((transmute(^u16)&data[12])^))
-        },
-    },
-    "ripple-correction" = Query {
-        data = QUERY_HIBERNATION, 
-        extract = proc(data: []u8) -> string {
-            return fmt.aprint(decode_driver_number((transmute(^u16)&data[14])^))
+        insert = proc(data: []u8, obj: ^json.Object) {
+            obj["hibernation"]       = (hib_to_string(Hibernation(decode_driver_number((transmute(^u16)&data[10])^)) ))
+            obj["key_delay"]         = i64(decode_driver_number((transmute(^u16)&data[6])^))
+            obj["move_sync"]         = bool(decode_driver_number((transmute(^u16)&data[8])^))
+            obj["angle_snap"]        = bool(decode_driver_number((transmute(^u16)&data[12])^))
+            obj["ripple_correction"] = bool(decode_driver_number((transmute(^u16)&data[14])^))
         },
     },
 }
@@ -265,15 +246,17 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
     libusb.claim_interface(mouse, INTERFACE) or_return
     defer libusb.release_interface(mouse, INTERFACE)
 
-    if opts.query != "" {
-        string_querries := strings.split(opts.query, ",")
-        for query in string_querries {
-            if q, ok := querries[query]; ok {
-                ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, q.data[:]) or_return
-                interrupt_transfer(mouse, 0x82, q.data[:]) or_return
-                fmt.println(q.extract(q.data[:]))
-            }
+    if opts.query {
+        obj := json.Object {}
+        for &q in querries {
+            ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, q.data[:]) or_return
+            interrupt_transfer(mouse, 0x82, q.data[:]) or_return
+            q.insert(q.data[:], &obj)
+        
         }
+        mopts := json.Marshal_Options { pretty = true }
+        json.marshal_to_writer(io.to_writer(os.stream_from_handle(os.stdout)), obj, &mopts)
+        fmt.println()
     }
 
     if opts.polling_rate != 0 {
@@ -337,12 +320,6 @@ main :: proc () {
         return
     }
     flags.parse_or_exit(&opts, os.args, .Unix)
-    if opts.list_querriable {
-        for k, _ in querries {
-            fmt.println(k)
-        }
-        return  
-    } 
     err := driver_main(opts)
     if err != nil {
         fmt.eprintln("ERROR:", err)
