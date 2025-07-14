@@ -1,6 +1,7 @@
 #+feature dynamic-literals
 package atka9ultra
 import "core:fmt"
+import "base:builtin"
 import "core:strings"
 import "core:os"
 import "core:sys/posix"
@@ -20,8 +21,6 @@ PID_8K    :: 0x101b
 PID_WIRED    :: 0x1119
 INTERFACE :: 1
 can_do_more_than_1K := false
-
-wired := false
 
 open_mouse :: proc(ctx: libusb.Context) -> (dev_handle: libusb.Device_Handle, has_kern_driver: bool, err: libusb.Error) {
     dev: libusb.Device = nil
@@ -81,17 +80,6 @@ interrupt_transfer :: proc(dev_handle: libusb.Device_Handle, endpoint: u8, buf: 
     return err
 }
 
-set_polling_rate :: proc (dev_handle: libusb.Device_Handle, polling_rate: PollingRate) -> libusb.Error {
-    payload := QUERY_POLL
-    query(dev_handle, payload[:]) or_return
-    payload[1] = 7
-    payload[16] = 0x41
-    (transmute(^u16)&payload[6])^ = encode_driver_number(int(polling_rate))
-    ctrl_transfer(dev_handle, 0x21, 0x9, 0x0208, INTERFACE, payload[:]) or_return
-    buf := [17]u8{}
-    interrupt_transfer(dev_handle, 0x82, buf[:]) or_return
-    return nil
-}
 CliOptions :: struct {
     polling_rate: int `usage:"Set polling rate(125, 250, 500, 1000, 2000, 4000, 8000)"`,
     hibernation: string `usage:"Set hibernation time(10s, 30s, 50s, 1m, 2m, 15m, 30m)"`,
@@ -107,10 +95,6 @@ InvalidValue :: union {
 DriverError :: union #shared_nil {
     libusb.Error,
     InvalidValue,
-}
-Query :: struct {
-    data: [17]u8,
-    insert: proc(data: []u8, obj: ^json.Object),
 }
 Hibernation :: enum {
     S10 = 1,
@@ -138,16 +122,21 @@ hib_to_string :: proc(hib: Hibernation) -> string {
         return fmt.aprintf("%im", val * 10 / 60)
     }
 } 
+Query :: struct {
+    data: [17]u8,
+    variable: [][]u8,
+    insert: proc(data: []u8, idx: int, obj: ^json.Object),
+}
 querries: []Query = {
     Query {
         data = QUERY_CHARGE,
-        insert = proc(data: []u8, obj: ^json.Object) {
+        insert = proc(data: []u8, _: int, obj: ^json.Object) {
             obj["charge"] = i64(data[6])
         }
     },
     Query {
         data = QUERY_POLL,
-        insert = proc(data: []u8, obj: ^json.Object) {
+        insert = proc(data: []u8, _: int, obj: ^json.Object) {
             polls_reverse := map[PollingRate]int {
                 .Hz125 = 125,
                 .Hz250 = 250,
@@ -162,12 +151,30 @@ querries: []Query = {
     },
     Query {
         data = QUERY_HIBERNATION, 
-        insert = proc(data: []u8, obj: ^json.Object) {
+        insert = proc(data: []u8, _:int, obj: ^json.Object) {
             obj["hibernation"]       = (hib_to_string(Hibernation(decode_driver_number((transmute(^u16)&data[10])^)) ))
             obj["key_delay"]         = i64(decode_driver_number((transmute(^u16)&data[6])^))
             obj["move_sync"]         = bool(decode_driver_number((transmute(^u16)&data[8])^))
             obj["angle_snap"]        = bool(decode_driver_number((transmute(^u16)&data[12])^))
             obj["ripple_correction"] = bool(decode_driver_number((transmute(^u16)&data[14])^))
+        },
+    },
+    Query {
+        data = QUERY_DPI_COLOR, 
+        variable = [][]u8{
+            []u8 { 4, 0x2c, 16, 0x11, }, // idx, val, idx, val ...
+            []u8 { 4, 0x34, 16, 0x09, },
+            []u8 { 4, 0x3c, 16, 0x01, },
+            []u8 { 4, 0x44, 16, 0xf9, },
+        },
+        insert = proc(data: []u8, idx: int, obj: ^json.Object) {
+            if _, ok := obj["dpi_colors"]; !ok {
+                obj["dpi_colors"] = json.Array(make([dynamic]json.Value, 8, 8))
+            }
+            arr := &obj["dpi_colors"]
+            ar := &arr.(json.Array)
+            ar[idx*2] = fmt.aprintf("%6X", u32((transmute(^u32be)&data[6])^) >> 8)
+            ar[idx*2+1] = fmt.aprintf("%6X", u32((transmute(^u32be)&data[10])^) >> 8)
         },
     },
 }
@@ -178,10 +185,22 @@ QUERY_KEY_DELAY         :: QUERY_HIBERNATION
 QUERY_MOVE_SYNC         :: QUERY_HIBERNATION
 QUERY_ANGLE_SNAP        :: QUERY_HIBERNATION
 QUERY_RIPPLE_CORRECTION :: QUERY_HIBERNATION
+QUERY_DPI_COLOR         :: [?]u8{ 0x8, 0x8, 0x0, 0x0, 0x2c, 0x8, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x11 }; 
 
 query :: proc(mouse: libusb.Device_Handle, data: []u8) -> libusb.Error {
     ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, data[:]) or_return
     interrupt_transfer(mouse, 0x82, data[:]) or_return
+    return nil
+}
+set_polling_rate :: proc (dev_handle: libusb.Device_Handle, polling_rate: PollingRate) -> libusb.Error {
+    payload := QUERY_POLL
+    query(dev_handle, payload[:]) or_return
+    payload[1] = 7
+    payload[16] = 0x41
+    (transmute(^u16)&payload[6])^ = encode_driver_number(int(polling_rate))
+    ctrl_transfer(dev_handle, 0x21, 0x9, 0x0208, INTERFACE, payload[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(dev_handle, 0x82, buf[:]) or_return
     return nil
 }
 set_key_delay :: proc(mouse: libusb.Device_Handle, key_delay: int) -> libusb.Error {
@@ -253,9 +272,25 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
     if opts.query {
         obj := json.Object {}
         for &q in querries {
-            ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, q.data[:]) or_return
-            interrupt_transfer(mouse, 0x82, q.data[:]) or_return
-            q.insert(q.data[:], &obj)
+            if len(q.variable) != 0 {
+                for v, i in q.variable {
+                    vi := 0
+                    dat := q.data
+                    for vi < len(v) {
+                        idx := v[vi]
+                        val := v[vi+1]
+                        dat[idx] = val
+                        vi += 2
+                    }
+                    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, dat[:]) or_return
+                    interrupt_transfer(mouse, 0x82, dat[:]) or_return
+                    q.insert(dat[:], i, &obj)
+                }
+            } else {
+                ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, q.data[:]) or_return
+                interrupt_transfer(mouse, 0x82, q.data[:]) or_return
+                q.insert(q.data[:], 0, &obj)
+            }
         
         }
         mopts := json.Marshal_Options { pretty = true }
