@@ -7,6 +7,7 @@ Capabilities:
 - [X] Set/Query ripple correction
 - [X] Set/Query move synchronization
 - [X] Set/Query key delay time
+- [X] Set/Query DPI colors 
 # Build requirements
     - odin
     - make

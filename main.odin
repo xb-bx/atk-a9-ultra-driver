@@ -1,6 +1,7 @@
 #+feature dynamic-literals
 package atka9ultra
 import "core:fmt"
+import "core:text/regex"
 import "base:builtin"
 import "core:strings"
 import "core:os"
@@ -79,7 +80,9 @@ interrupt_transfer :: proc(dev_handle: libusb.Device_Handle, endpoint: u8, buf: 
     if int(err) >= 0 do return nil
     return err
 }
-
+DpiColors :: struct {
+    colors: [8]int,
+}
 CliOptions :: struct {
     polling_rate: int `usage:"Set polling rate(125, 250, 500, 1000, 2000, 4000, 8000)"`,
     hibernation: string `usage:"Set hibernation time(10s, 30s, 50s, 1m, 2m, 15m, 30m)"`,
@@ -88,6 +91,7 @@ CliOptions :: struct {
     angle_snap: int `usage:"Set angle snape(0, 1)"`,
     ripple_correction: int `usage:"Set ripple correction(0, 1)"`,
     query: bool `usage:"Output current mouse state in json"`,
+    dpi_color: DpiColors `usage:"Set dpi colors(1=ff00ff)"`
 } 
 InvalidValue :: union {
     string
@@ -258,6 +262,29 @@ set_hibernation :: proc(mouse: libusb.Device_Handle, hibernation: Hibernation) -
     interrupt_transfer(mouse, 0x82, buf[:]) or_return
     return nil
 }
+set_dpi_color :: proc(mouse: libusb.Device_Handle, color: u32, idx: int) -> libusb.Error {
+    index := idx / 2
+    q := QUERY_DPI_COLOR 
+    q[4]  = 0x2c + u8(index) * 8
+    q[16] = 0x11 - u8(index) * 8
+    query(mouse, q[:]) or_return
+    q[1]  = 0x7
+    q[4]  = 0x2c + u8(index) * 8
+    q[16] = 0x68 - u8(index) * 8
+
+    off := 6
+    if idx % 2 == 1 do off = 10
+
+    q[off]     = u8((color & 0xFF0000) >> 16)
+    q[off + 1] = u8((color & 0x00FF00) >> 8)
+    q[off + 2] = u8((color & 0x0000FF))
+    q[off + 3] = 0x55 - q[off] - q[off+1] - q[off + 2] 
+
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
+    return nil
+}
 
 
 driver_main :: proc(opts: CliOptions) -> DriverError {
@@ -345,8 +372,39 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
             return "hibernation"
         }
     }
-
+    for color,i in opts.dpi_color.colors {
+        if color != -1 {
+            set_dpi_color(mouse, u32(color), i) or_return
+        }
+    }
     return nil
+}
+dpi_map_type_setter :: proc(
+	data: rawptr,
+	data_type: typeid,
+	unparsed_value: string,
+	args_tag: string,
+) -> (
+	error: string,
+	handled: bool,
+	alloc_error: runtime.Allocator_Error,
+) {
+    if data_type == DpiColors {
+        handled = true
+        iter, err := regex.create_iterator(unparsed_value, "^([0-9])=([0-9A-Fa-f]{6})$")
+        defer regex.destroy_iterator(iter)
+        set := false
+        for r,i in regex.match_iterator(&iter) {
+            idx := strconv.atoi(r.groups[1])
+            val, _ := strconv.parse_uint(r.groups[2], 16)
+            colors := transmute(^DpiColors)data
+            colors.colors[idx-1] = int(val)
+            set = true
+            break
+        }
+        if !set do error = "expected <dpi_index>=<dpi_color_in_hex>, for example: 1=00ff00"
+    }
+    return
 }
 main :: proc () {
     opts: CliOptions = {}
@@ -354,10 +412,14 @@ main :: proc () {
     opts.move_sync         = -1
     opts.angle_snap        = -1
     opts.ripple_correction = -1
+    for i in 0..<8 {
+        opts.dpi_color.colors[i] = -1
+    }
     if len(os.args) == 1 {
         flags.write_usage(os.stream_from_handle(os.stdout), typeid_of(CliOptions), os.args[0], .Unix)
         return
     }
+    flags.register_type_setter(dpi_map_type_setter)
     flags.parse_or_exit(&opts, os.args, .Unix)
     err := driver_main(opts)
     if err != nil {
