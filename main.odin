@@ -17,6 +17,7 @@ import "libusb"
 VID       :: 0x373b
 PID       :: 0x101a
 PID_8K    :: 0x101b
+PID_WIRED    :: 0x1119
 INTERFACE :: 1
 can_do_more_than_1K := false
 
@@ -30,9 +31,9 @@ open_mouse :: proc(ctx: libusb.Context) -> (dev_handle: libusb.Device_Handle, ha
     for idev in devs {
         desc: libusb.Device_Descriptor = {}
         if libusb.get_device_descriptor(idev, &desc) != .SUCCESS do continue
-        if (desc.idProduct == PID || desc.idProduct == PID_8K) && desc.idVendor == VID {
+        if (desc.idProduct == PID || desc.idProduct == PID_8K || desc.idProduct == PID_WIRED) && desc.idVendor == VID {
             dev = idev
-            can_do_more_than_1K = desc.idProduct == PID_8K
+            can_do_more_than_1K = desc.idProduct != PID
             break
         }
     } 
@@ -81,7 +82,10 @@ interrupt_transfer :: proc(dev_handle: libusb.Device_Handle, endpoint: u8, buf: 
 }
 
 set_polling_rate :: proc (dev_handle: libusb.Device_Handle, polling_rate: PollingRate) -> libusb.Error {
-    payload := [?]u8{ 0x08, 0x07, 0x00, 0x00, 0x00, 0x06, 0x08, 0x4d, 0x04, 0x51, 0x03, 0x52, 0x00, 0x00, 0x00, 0x00, 0x41, }; 
+    payload := QUERY_POLL
+    query(dev_handle, payload[:]) or_return
+    payload[1] = 7
+    payload[16] = 0x41
     (transmute(^u16)&payload[6])^ = encode_driver_number(int(polling_rate))
     ctrl_transfer(dev_handle, 0x21, 0x9, 0x0208, INTERFACE, payload[:]) or_return
     buf := [17]u8{}
