@@ -8,6 +8,7 @@ Capabilities:
 - [X] Set/Query move synchronization
 - [X] Set/Query key delay time
 - [X] Set/Query DPI colors 
+- [X] Set/Query Performance mode
 # Build requirements
     - odin
     - make
@@ -20,12 +21,12 @@ make
 # Installation
 ## Arch-based distros
 ```sh
-git clone https://github.com/xb-bx/attack-shark-r1-driver --recursive
-cd attack-shark-r1-driver
+git clone https://github.com/xb-bx/atk-a9-ultra-driver --recursive
+cd atk-a9-ultra-driver 
 makepkg -si
 ```
 ## Other
 ```sh
-git clone https://github.com/xb-bx/attack-shark-r1-driver --recursive
+git clone https://github.com/xb-bx/atk-a9-ultra-driver --recursive
 sudo make install
 ```

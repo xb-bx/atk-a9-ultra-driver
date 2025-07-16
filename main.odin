@@ -59,6 +59,11 @@ PollingRate :: enum {
     Hz4000 = 0x20,
     Hz8000 = 0x40,
 }
+PerformanceMode :: enum {
+    Basic = 0,
+    Competetive,
+    CompetetiveMax,
+}
 decode_driver_number :: proc(number: u16) -> int {
     return int(number & 0xFF)
 }
@@ -91,7 +96,8 @@ CliOptions :: struct {
     angle_snap: int `usage:"Set angle snape(0, 1)"`,
     ripple_correction: int `usage:"Set ripple correction(0, 1)"`,
     query: bool `usage:"Output current mouse state in json"`,
-    dpi_color: DpiColors `usage:"Set dpi colors(1=ff00ff)"`
+    dpi_color: DpiColors `usage:"Set dpi colors(1=ff00ff)"`,
+    perf_mode: PerformanceMode `usage:"Set performance mode"`
 } 
 InvalidValue :: union {
     string
@@ -164,6 +170,12 @@ querries: []Query = {
         },
     },
     Query {
+        data = QUERY_PERF_MODE,
+        insert = proc(data: []u8, _:int, obj: ^json.Object) {
+            obj["perf_mode"] = fmt.aprint(PerformanceMode(decode_driver_number((transmute(^u16)&data[10])^)))
+        }
+    },
+    Query {
         data = QUERY_DPI_COLOR, 
         variable = [][]u8{
             []u8 { 4, 0x2c, 16, 0x11, }, // idx, val, idx, val ...
@@ -189,11 +201,23 @@ QUERY_KEY_DELAY         :: QUERY_HIBERNATION
 QUERY_MOVE_SYNC         :: QUERY_HIBERNATION
 QUERY_ANGLE_SNAP        :: QUERY_HIBERNATION
 QUERY_RIPPLE_CORRECTION :: QUERY_HIBERNATION
-QUERY_DPI_COLOR         :: [?]u8{ 0x8, 0x8, 0x0, 0x0, 0x2c, 0x8, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x11 }; 
+QUERY_DPI_COLOR         :: [?]u8{ 0x8, 0x8, 0x0, 0x0, 0x2c, 0x8, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x11 }
+QUERY_PERF_MODE         :: [?]u8{ 0x8, 0x8, 0x0, 0x0, 0xb5, 0x6, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x0, 0x8a }
 
 query :: proc(mouse: libusb.Device_Handle, data: []u8) -> libusb.Error {
     ctrl_transfer(mouse, 0x21, 0x9, 0x0208, 1, data[:]) or_return
     interrupt_transfer(mouse, 0x82, data[:]) or_return
+    return nil
+}
+set_perf_mode :: proc (mouse: libusb.Device_Handle, mode: PerformanceMode) -> libusb.Error {
+    q := QUERY_PERF_MODE
+    query(mouse, q[:]) or_return
+    q[1] = 7
+    q[16] = 0x8c
+    (transmute(^u16)&q[10])^ = encode_driver_number(int(mode))
+    ctrl_transfer(mouse, 0x21, 0x9, 0x0208, INTERFACE, q[:]) or_return
+    buf := [17]u8{}
+    interrupt_transfer(mouse, 0x82, buf[:]) or_return
     return nil
 }
 set_polling_rate :: proc (dev_handle: libusb.Device_Handle, polling_rate: PollingRate) -> libusb.Error {
@@ -372,6 +396,9 @@ driver_main :: proc(opts: CliOptions) -> DriverError {
             return "hibernation"
         }
     }
+    if int(opts.perf_mode) != -1 {
+        set_perf_mode(mouse, opts.perf_mode)
+    }
     for color,i in opts.dpi_color.colors {
         if color != -1 {
             set_dpi_color(mouse, u32(color), i) or_return
@@ -412,6 +439,7 @@ main :: proc () {
     opts.move_sync         = -1
     opts.angle_snap        = -1
     opts.ripple_correction = -1
+    opts.perf_mode         = PerformanceMode(-1)
     for i in 0..<8 {
         opts.dpi_color.colors[i] = -1
     }
